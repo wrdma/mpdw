@@ -1,0 +1,191 @@
+---
+title: "Pertemuan 3 - Regresi dengan Peubah Lag"
+author: "Rafael Dominico Prasetyo"
+date: "2026-09-06"
+output:
+  html_document: default
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r}
+library(dLagM)
+library(dynlm)
+library(MLmetrics)
+library(lmtest)
+library(readr)
+```
+
+# Import data
+```{r}
+data_aqi <-read.csv("C:\\Users\\Rafael Dominico\\Pictures\\Kuliah\\Semester 5\\Metode Peramalan Deret Waktu\\4\\NewDelhi_Air_quality.csv")
+head(data_aqi)
+
+train <-data_aqi[1:56,]
+test <-data_aqi[57:71,]
+
+train.ts <- ts(train)
+test.ts <- ts(test)
+data.ts <- ts(data_aqi)
+```
+# Model Koyck
+Model Koyck mengatasi masalah infinite distributed lag (pengaruh masa lalu yang tak terhingga) dengan mengasumsikan bahwa semakin jauh jarak lag, semakin kecil pengaruhnya.
+
+Melalui transformasi aljabar, efek masa lalu dari X yang sangat panjang diringkas ke dalam satu variabel saja, yaitu Yt−1 . Bentuk persamaannya menjadi:
+
+$Y_t = a(1-\lambda) + \beta_0 X_t + \lambda Y_{t-1} + V_t$
+
+## Pemodelan
+```{r}
+model.koyck <- koyckDlm(x = train$CO, y = train$AQI)
+summary(model.koyck)
+```
+Model Koyck menunjukkan bahwa variabel CO​tidak memiliki pengaruh signifikan terhadap AQI dalam jangka pendek dengan koefisien -0.005832. Hasil p-value = 0.916>0.05 yang menunjukkan variabel CO tidak signifikan. Adjusted R-squared menunjukkan 0.8102(81%) yang berarti model koyck dapat  menjelasakan variabel AQI sebesar 81%.
+
+## Peramalan
+```{r}
+fore.koyck <- forecast(model = model.koyck, x = test$CO, h = 15)
+fore.koyck
+```
+
+## Cek akurasi MAPE
+```{r}
+mape.koyck <- MAPE(fore.koyck$forecasts, test$AQI)
+cat("MAPE Model Koyck:", mape.koyck, "\n")
+```
+MAPE: 0.1261175 (12.61%). Model DLM dengan q=1 memiliki tingkat kesalahan peramalan 12.61%
+
+# Regression with Distributed Lag (DLM)
+Berbeda dengan Koyck, pemodelan DLM membatasi secara spesifik berapa periode memori masa lalu yang dilibatkan. Batasan ini direpresentasikan dengan parameter q.
+
+$Y_t = \alpha + \beta_0 X_t + \beta_1 X_{t-1} + \dots + \beta_q X_{t-q} + e_t$
+
+```{r}
+model.dlm <- dlm(x = train$CO, y = train$AQI, q = 2)
+summary(model.dlm)
+```
+Pada model DLM, variabel CO saat ini (x.t) signifikan, sedangkan lag 1 (x.1) dan lag 2 (x.2) tidak signifikan. Hasil adjusted R-squared menunjukkan 41.87%.
+
+## Penentuan Lag Optimum
+### Contoh Pemodelan (Lag = 2)
+
+```{r}
+finiteDLMauto(formula = AQI ~ CO,
+              data = data.frame(train), q.min = 1, q.max = 10,
+              model.type = "dlm", error.type = "AIC", trace = TRUE)
+```
+
+## Penentuan Lag Optimum
+
+```{r}
+finiteDLMauto(formula = AQI ~ CO,
+              data = data.frame(train), q.min = 1, q.max = 10,
+              model.type = "dlm", error.type = "AIC", trace = TRUE)
+```
+Model yang optimum dengan AIC terkecil adalah lag 1.
+
+```{r}
+# Bangun ulang model
+model.dlm <- dlm(x = train$CO, y = train$AQI, q = 1)
+summary(model.dlm)
+```
+```{r}
+# Peramalan model DLM Optimum
+fore.dlm.opt <- forecast(model = model.dlm, x = test$CO, h = 15)
+mape.dlm.opt <- MAPE(fore.dlm.opt$forecasts, test$AQI)
+cat("MAPE Model DLM Optimum:", mape.dlm.opt, "\n")
+```
+Tingkat kesalahan MAPE adalah 0.126 (12.6%)
+
+# Autoregressive Distributed Lag (ARDL)
+
+```{r}
+# Model ARDL dengan lag X = 1 dan lag Y = 1
+model.ardl <- ardlDlm(formula = AQI ~ CO, data = train, p = 1, q = 1)
+summary(model.ardl)
+```
+Hasil model ARDL menunjukkan nilai variabel CO saat ini dan nilai CO 1 periode sebelumnya berpengaruh pada nilai AQI. Begitu juga dengan nilai variabel AQI periode sebelumnya berpengaruh pada nilai AQI saat ini.  
+
+## Lag Optimum ARDL
+
+```{r}
+model.ardl.opt <- ardlBoundOrders(data = data.frame(data_aqi), ic = "AIC", formula = AQI ~ CO)
+
+# Menarik kombinasi lag dengan AIC terkecil
+min_p <- c()
+for(i in 1:6){
+  min_p[i] <- min(model.ardl.opt$Stat.table[[i]])
+}
+q_opt <- which(min_p == min(min_p, na.rm = TRUE))
+p_opt <- which(model.ardl.opt$Stat.table[[q_opt]] == min(model.ardl.opt$Stat.table[[q_opt]], na.rm = TRUE))
+
+data.frame("Lag_Y_opt(q)" = q_opt, "Lag_X_opt(p)" = p_opt, "AIC" = model.ardl.opt$min.Stat)
+```
+
+```{r}
+# Peramalan ARDL awal (p=1, q=1)
+fore.ardl <- forecast(model = model.ardl, x = test$CO, h = 15)
+mape.ardl <- MAPE(fore.ardl$forecasts, test$AQI)
+cat("MAPE Model ARDL (1,1):", mape.ardl, "\n")
+```
+Tingkat kesalahan MAPE model ini mencapai 0.148(14.8%)
+
+# Pendekatan dengan Library dynlm dan Uji Asumsi
+
+```{r}
+# Sama dengan DLM (q=1)
+cons_lm1 <- dynlm(AQI ~ CO + L(CO), data = train.ts)
+
+# Setara dengan Model Autoregressive Murni (Hanya melibatkan Xt dan Yt-1)
+cons_lm2 <- dynlm(AQI ~ CO + L(AQI), data = train.ts)
+
+# Sama dengan ARDL (p=1, q=1)
+cons_lm3 <- dynlm(AQI ~ CO + L(CO) + L(AQI), data = train.ts)
+```
+
+
+# Uji Asumsi Model (Contoh pada cons_lm1)
+
+## 1. Uji Autokorelasi (Durbin-Watson)
+H0: Tidak ada autokorelasi
+```{r}
+dwtest(cons_lm1)
+```
+## 2. Uji Heteroskedastisitas (Breusch-Pagan)
+H0: Ragam sisaan homogen
+```{r}
+bptest(cons_lm1)
+```
+## 3. Uji Normalitas (Shapiro-Wilk)
+H0: Sisaan berdistribusi normal
+```{r}
+shapiro.test(residuals(cons_lm1))
+```
+# Perbandingan Performa Model
+
+```{r}
+akurasi <- matrix(c(mape.koyck, mape.dlm.opt, mape.ardl))
+row.names(akurasi) <- c("Koyck", "DLM Optimum", "ARDL (1,1)")
+colnames(akurasi) <- c("MAPE")
+print(akurasi)
+```
+Semakin kecil nilai MAPE maka semakin baik model tersebut. Dapat disimpulkan bahwa Model DLM Optimum (dengan q=1) adalah model terbaik untuk memprediksi AQI berdasarkan CO. Tingkat akurasi peramalan (1 - MAPE) sekitar 87.39%.
+
+# Visualisasi Aktual vs Peramalan
+
+```{r}
+par(mfrow=c(1,1))
+plot(test$CO, test$AQI, type="b", col="black", ylim=c(0,40), lwd=2, 
+     ylab="Nilai Y", xlab="Nilai X", main="Perbandingan Model Peramalan")
+
+lines(test$CO, fore.koyck$forecasts, col="red", type="b", pch=16)
+lines(test$CO, fore.dlm.opt$forecasts, col="blue", type="b", pch=17)
+lines(test$CO, fore.ardl$forecasts, col="green", type="b", pch=18)
+
+legend("topleft", legend=c("Aktual", "Koyck", "DLM Optimum", "ARDL (1,1)"),
+       col=c("black","red","blue","green"), lty=1, pch=c(1,16,17,18), cex=0.8, inset=0.02)
+```
+Garis merah (Koyck) tampak lebih melandai dan menjauhi data aktual sesuai dengan nilai MAPE-nya yang tertinggi (21.52%).
+
+Garis biru (DLM) dan hijau (ARDL) berada lebih dekat dengan pola garis hitam. Garis biru (DLM) secara visual umumnya menjadi yang paling mendekati titik-titik aktual.
+
