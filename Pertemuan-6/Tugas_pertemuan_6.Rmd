@@ -1,0 +1,243 @@
+---
+title: "MPDW Tugas ARIMA"
+author: "Rafael Dominico Prasetyo - M0401241068"
+date: "2026-09-29"
+output: html_document
+---
+
+
+```{r}
+library(readxl)
+library(forecast)
+library(tseries)
+library(lmtest)
+library(car)
+```
+
+# Data
+
+```{r}
+path <- "C:/Users/Rafael Dominico/Pictures/Kuliah/Semester 5/Metode Peramalan Deret Waktu/GC_F_2020_2026.xlsx"
+dat  <- read_excel(path, sheet = "Sheet1")
+dat$date <- as.Date(dat$date)
+dat  <- dat[order(dat$date), ]
+
+str(dat)
+summary(dat$Price)
+sum(is.na(dat$Price))   # cek missing value
+
+# Plot data penuh
+plot(dat$date, dat$Price, type = "l", col = "blue",
+     xlab = "Tanggal", ylab = "Harga (USD)", main = "Plot Data Penuh GC=F")
+```
+# Pemisahan data trend dengan data test
+
+```{r}
+n       <- nrow(dat)
+n.train <- floor(0.8 * n)
+
+train.price <- dat$Price[1:n.train]
+test.price  <- dat$Price[(n.train + 1):n]
+
+train.ts <- ts(train.price)
+test.ts  <- ts(test.price)
+
+cat("Total:", n, "| Train:", length(train.ts), "| Test:", length(test.ts), "\n")
+
+plot.ts(train.ts, xlab = "Waktu", ylab = "Harga", main = "Plot Data Latih")
+plot.ts(test.ts,  xlab = "Waktu", ylab = "Harga", main = "Plot Data Uji")
+```
+
+# Uji stasioneritas
+
+```{r}
+acf(train.ts, lag.max = 40, main = "ACF Data Latih")
+
+tseries::adf.test(train.ts)
+
+index <- seq_along(train.ts)
+bc <- MASS::boxcox(train.ts ~ index, lambda = seq(-2, 2, by = 0.05))
+
+lambda_opt <- bc$x[which.max(bc$y)]
+ci_lambda  <- bc$x[bc$y > max(bc$y) - 0.5 * qchisq(0.95, df = 1)]
+ci_lower   <- min(ci_lambda)
+ci_upper   <- max(ci_lambda)
+
+lambda_opt
+c(Batas_Bawah = ci_lower, Batas_Atas = ci_upper)
+
+ragam_stasioner <- (ci_lower <= 1 & ci_upper >= 1)
+cat("Selang kepercayaan 95% memuat 1? ", ragam_stasioner, "\n")
+```
+Hipotesis:
+H0: Data tidak stasioner dalam rataan
+H1: Data stasioner dalam rataan
+
+Hasilnya p value di atas 0.05, maka data tersebut gagal tolak H0. Data tersebut tidak stasioner. Dalam plot box cox selang kepercayaan memuat 1 yang juga menunjukkan bahwa data tersebut tidak stasioner.
+
+# Penanganan ketidakstasioneran
+
+```{r}
+bc.fwd <- function(x, lam) if (abs(lam) < 0.05) log(x) else (x^lam - 1) / lam
+bc.inv <- function(y, lam) if (abs(lam) < 0.05) exp(y) else (lam * y + 1)^(1 / lam)
+
+if (!ragam_stasioner) {
+  cat("Ragam belum stasioner -> transformasi Box-Cox, lambda =", lambda_opt, "\n")
+  train.t <- ts(bc.fwd(train.ts, lambda_opt))
+  plot.ts(train.t, main = "Data Latih Setelah Transformasi")
+} else {
+  cat("Ragam sudah stasioner -> tanpa transformasi\n")
+  lambda_opt <- 1
+  train.t <- train.ts
+}
+```
+
+# Differencing
+
+```{r}
+train.diff <- diff(train.t, differences = 1)
+
+plot.ts(train.diff, xlab = "Waktu", ylab = "Diff 1", main = "Plot Differencing Pertama")
+acf(train.diff, lag.max = 40, main = "ACF Setelah Differencing")
+tseries::adf.test(train.diff)   # harapannya p-value < 0.05
+```
+Setelah differencing data sudah stasioner dengan p value < 0.05
+
+# Cari model yang potensial dari ACF, PACF, dan EACF
+
+```{r}
+par(mfrow = c(1, 2))
+acf(train.diff,  lag.max = 30, main = "ACF (diff)")
+pacf(train.diff, lag.max = 30, main = "PACF (diff)")
+par(mfrow = c(1, 1))
+
+TSA::eacf(train.diff, ar.max = 7, ma.max = 13)
+
+kandidat <- list(c(0, 1), c(1, 0), c(1, 1), c(0, 2), c(2, 0), c(1, 2), c(2, 1), c(2, 2))
+
+fit_model <- function(x, p, q) {
+  tryCatch(Arima(x, order = c(p, 0, q), method = "ML"), error = function(e) NULL)
+}
+
+sig_semua <- function(m) {
+  ct <- lmtest::coeftest(m)
+  pv <- ct[!rownames(ct) %in% "intercept", 4]
+  if (length(pv) == 0) return(NA)
+  isTRUE(all(pv < 0.05))
+}
+
+model_list <- list()
+hasil <- data.frame()
+for (k in kandidat) {
+  nama <- sprintf("ARIMA(%d,1,%d)", k[1], k[2])
+  m <- fit_model(train.diff, k[1], k[2])
+  if (is.null(m)) next
+  model_list[[nama]] <- m
+  hasil <- rbind(hasil, data.frame(
+    Model = nama, AIC = AIC(m), BIC = BIC(m),
+    Semua_Parameter_Signifikan = sig_semua(m)))
+}
+hasil <- hasil[order(hasil$AIC), ]
+print(hasil, row.names = FALSE)
+
+# Detail signifikansi tiap model
+for (nm in names(model_list)) {
+  cat("\n=====", nm, "=====\n")
+  print(lmtest::coeftest(model_list[[nm]]))
+}
+
+
+layak <- hasil[which(hasil$Semua_Parameter_Signifikan), ]
+model_terbaik <- if (nrow(layak) > 0) layak$Model[1] else hasil$Model[1]
+cat("\nModel terbaik:", model_terbaik, "\n")
+
+best.fit <- model_list[[model_terbaik]]
+pq <- as.integer(regmatches(model_terbaik, gregexpr("[0-9]+", model_terbaik))[[1]])
+p.b <- pq[1]; q.b <- pq[3]
+summary(best.fit)
+
+```
+
+# Analisis sisaan
+
+```{r}
+sisaan <- as.numeric(residuals(best.fit))
+
+par(mfrow = c(2, 2))
+car::qqPlot(sisaan, main = "Normal Q-Q Plot", ylab = "Sisaan")
+plot(sisaan, type = "p", main = "Sisaan vs Waktu", xlab = "Waktu", ylab = "Sisaan")
+acf(sisaan,  main = "ACF Sisaan")
+pacf(sisaan, main = "PACF Sisaan")
+par(mfrow = c(1, 1))
+
+# Uji formal
+
+ks.test(sisaan, "pnorm", mean(sisaan), sd(sisaan))
+tseries::jarque.bera.test(sisaan)
+
+# 2) Kebebasan / tidak ada autokorelasi (H0: sisaan saling bebas)
+Box.test(sisaan, lag = 20, type = "Ljung-Box", fitdf = p.b + q.b)
+
+# 3) Kehomogenan ragam (H0: ragam homogen), Ljung-Box pada sisaan kuadrat
+Box.test(sisaan^2, lag = 20, type = "Ljung-Box")
+
+# 4) Nilai tengah sisaan = 0 (H0: mean sisaan = 0)
+t.test(sisaan, mu = 0, conf.level = 0.95)
+```
+
+Hasil:
+QQ plot: data memiliki ekor pada kedua ujungnya yang menandakan tidak berdistribusi normal
+Sisaan vs waktu: sisaan sedikit tersebar pada data bagian wal tetapi tetap terdistribusi di sekitar 0
+ACF dan PACF sisaan: sebagian besar masih berada dalam rentang cut off, sehingga data tersebut dapat dibilang tidak memiliki autokorelasi
+
+# Overfitting
+
+```{r}
+over <- list(c(p.b + 1, q.b), c(p.b, q.b + 1))
+hasil_over <- data.frame()
+for (k in over) {
+  nama <- sprintf("ARIMA(%d,1,%d)", k[1], k[2])
+  m <- fit_model(train.diff, k[1], k[2])
+  if (is.null(m)) next
+  cat("\n=====", nama, "=====\n")
+  print(lmtest::coeftest(m))
+  hasil_over <- rbind(hasil_over, data.frame(
+    Model = nama, AIC = AIC(m), BIC = BIC(m),
+    Semua_Parameter_Signifikan = sig_semua(m)))
+}
+hasil_over <- rbind(
+  data.frame(Model = model_terbaik, AIC = AIC(best.fit), BIC = BIC(best.fit),
+             Semua_Parameter_Signifikan = sig_semua(best.fit)),
+  hasil_over)
+print(hasil_over, row.names = FALSE)
+```
+
+# Peramalan
+
+```{r}
+h <- length(test.ts)
+
+ramalan <- forecast::forecast(best.fit, h = h)
+plot(ramalan, main = "Ramalan Data Differencing")
+
+titik_akhir <- tail(train.t, 1)
+fc.t <- diffinv(as.numeric(ramalan$mean), differences = 1, xi = as.numeric(titik_akhir))[-1]
+
+fc <- if (lambda_opt == 1) fc.t else bc.inv(fc.t, lambda_opt)
+
+perbandingan <- data.frame(Aktual = as.numeric(test.ts), Ramalan = fc)
+head(perbandingan, 10)
+
+accuracy(fc, as.numeric(test.ts))
+
+# Plot aktual vs ramalan
+ts.plot(ts(dat$Price), col = "black", xlab = "Waktu", ylab = "Harga (USD)",
+        main = "Aktual vs Ramalan (Data Uji)")
+lines((n.train + 1):(n.train + h), fc, col = "blue", lty = 2, lwd = 2)
+abline(v = n.train, col = "red", lty = 3)
+legend("topleft", legend = c("Data Aktual", "Ramalan", "Batas Train/Test"),
+       col = c("black", "blue", "red"), lty = c(1, 2, 3), lwd = c(1, 2, 1), bty = "n")
+```
+
+
+
